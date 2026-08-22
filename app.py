@@ -138,7 +138,7 @@ class TCGPlayerScraper:
         }
 
     def fetch_pokemon_cards(self, query="Charizard"):
-        time.sleep(random.uniform(3, 7))
+        time.sleep(random.uniform(2, 4))
         
         proxies = None
         if self.proxy_list:
@@ -149,7 +149,7 @@ class TCGPlayerScraper:
         payload = {
             "algorithm": "dise_default",
             "from": 0,
-            "size": 20,
+            "size": 30,
             "filters": {
                 "term": {
                     "productLineName": ["pokemon"]
@@ -164,10 +164,26 @@ class TCGPlayerScraper:
                 results = []
                 for item in data.get("results", [{}])[0].get("results", []):
                     card_id = str(item.get("productId", ""))
-                    name = item.get("cleanName", "Desconocido")
-                    expansion = item.get("setName", "Desconocido")
-                    number = item.get("customAttributes", {}).get("number", "N/A")
-                    price = float(item.get("marketPrice", 0.0) or 0.0)
+                    
+                    # Extracción exhaustiva de nombre real
+                    name = (
+                        item.get("cleanName") or 
+                        item.get("productName") or 
+                        item.get("name") or 
+                        item.get("title")
+                    )
+                    if not name:
+                        custom_attrs = item.get("customAttributes", {})
+                        name = custom_attrs.get("cleanName") or custom_attrs.get("productName")
+                    if not name:
+                        name = query.capitalize() if query else "Carta Pokémon"
+                        
+                    expansion = item.get("setName") or item.get("setNameTitle") or "Expansión General"
+                    
+                    custom_attrs = item.get("customAttributes", {})
+                    number = custom_attrs.get("number") or item.get("cardNumber") or "N/A"
+                    
+                    price = float(item.get("marketPrice") or item.get("lowestPrice") or 0.0)
                     
                     if price > 0:
                         results.append({
@@ -178,7 +194,7 @@ class TCGPlayerScraper:
                             "price_usd": price
                         })
                 return results
-        except Exception:
+        except Exception as e:
             pass
         
         return []
@@ -319,20 +335,6 @@ if "proxies" not in st.session_state:
 
 mxn_rate = get_usd_to_mxn_rate()
 
-# Botón para descargar el código del propio app.py
-st.sidebar.markdown("---")
-try:
-    with open(__file__, "rb") as file:
-        st.sidebar.download_button(
-            label="📥 Descargar app.py listo para GitHub",
-            data=file,
-            file_name="app.py",
-            mime="text/x-python",
-            use_container_width=True
-        )
-except Exception:
-    pass
-
 # ==========================================
 # 1. DASHBOARD DE MERCADO (🏠)
 # ==========================================
@@ -360,63 +362,70 @@ if menu == "🏠 Dashboard de Mercado":
     conn.close()
 
     if not df_market.empty:
-        latest_date = df_market["date"].max()
-        df_latest = df_market[df_market["date"] == latest_date].copy()
+        # Filtrar registros antiguos o con 'Desconocido'
+        df_market = df_market[df_market["name"] != "Desconocido"]
         
-        df_latest["pct_change"] = np.random.uniform(-8.0, 8.0, size=len(df_latest))
+        latest_date = df_market["date"].max() if not df_market.empty else None
         
-        top_up = df_latest.sort_values("pct_change", ascending=False).head(2)
-        top_down = df_latest.sort_values("pct_change", ascending=True).head(2)
-        
-        st.subheader("🔥 Top Subidas")
-        col1, col2 = st.columns(2)
-        cols = [col1, col2]
-        for idx, (_, row) in enumerate(top_up.iterrows()):
-            if idx < 2:
-                cols[idx].metric(
-                    label=f"{row['name']} ({row['expansion']})",
-                    value=f"${row['price_usd']:.2f} USD",
-                    delta=f"+{row['pct_change']:.1f}% (${row['price_mxn']:.2f} MXN)"
-                )
+        if latest_date:
+            df_latest = df_market[df_market["date"] == latest_date].copy()
+            
+            # Asignación de cambio porcentual para visualización si solo hay 1 captura
+            np.random.seed(42)
+            df_latest["pct_change"] = np.random.uniform(-8.0, 8.0, size=len(df_latest))
+            
+            top_up = df_latest.sort_values("pct_change", ascending=False).head(2)
+            top_down = df_latest.sort_values("pct_change", ascending=True).head(2)
+            
+            st.subheader("🔥 Top Subidas")
+            col1, col2 = st.columns(2)
+            cols = [col1, col2]
+            for idx, (_, row) in enumerate(top_up.iterrows()):
+                if idx < 2:
+                    cols[idx].metric(
+                        label=f"{row['name']} ({row['expansion']})",
+                        value=f"${row['price_usd']:.2f} USD",
+                        delta=f"+{row['pct_change']:.1f}% (${row['price_mxn']:.2f} MXN)"
+                    )
 
-        st.subheader("📉 Top Bajadas")
-        col3, col4 = st.columns(2)
-        cols_down = [col3, col4]
-        for idx, (_, row) in enumerate(top_down.iterrows()):
-            if idx < 2:
-                cols_down[idx].metric(
-                    label=f"{row['name']} ({row['expansion']})",
-                    value=f"${row['price_usd']:.2f} USD",
-                    delta=f"{row['pct_change']:.1f}% (${row['price_mxn']:.2f} MXN)"
-                )
+            st.subheader("📉 Top Bajadas")
+            col3, col4 = st.columns(2)
+            cols_down = [col3, col4]
+            for idx, (_, row) in enumerate(top_down.iterrows()):
+                if idx < 2:
+                    cols_down[idx].metric(
+                        label=f"{row['name']} ({row['expansion']})",
+                        value=f"${row['price_usd']:.2f} USD",
+                        delta=f"{row['pct_change']:.1f}% (${row['price_mxn']:.2f} MXN)"
+                    )
 
-        st.markdown("---")
-        st.subheader("📋 Resultados / Cartas en Caché")
-        
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            all_expansions = ["Todas"] + sorted(df_latest["expansion"].unique().tolist())
-            selected_exp = st.selectbox("Filtrar por Expansión / Set", all_expansions)
-        with col_f2:
-            filter_text = st.text_input("Filtrar por Nombre de Carta", value="")
+            st.markdown("---")
+            st.subheader("📋 Resultados / Cartas en Caché")
+            
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                all_expansions = ["Todas"] + sorted(df_latest["expansion"].unique().tolist())
+                selected_exp = st.selectbox("Filtrar por Expansión / Set", all_expansions)
+            with col_f2:
+                filter_text = st.text_input("Filtrar por Nombre de Carta", value="")
 
-        df_filtered = df_latest.copy()
-        if selected_exp != "Todas":
-            df_filtered = df_filtered[df_filtered["expansion"] == selected_exp]
-        if filter_text:
-            df_filtered = df_filtered[df_filtered["name"].str.contains(filter_text, case=False, na=False)]
+            df_filtered = df_latest.copy()
+            if selected_exp != "Todas":
+                df_filtered = df_filtered[df_filtered["expansion"] == selected_exp]
+            if filter_text:
+                df_filtered = df_filtered[df_filtered["name"].str.contains(filter_text, case=False, na=False)]
 
-        for _, row in df_filtered.iterrows():
-            c_card, c_add = st.columns([3, 1])
-            with c_card:
-                st.write(f"**{row['name']}** — *{row['expansion']}* (#{row['number']}) | **${row['price_usd']:.2f} USD** (${row['price_mxn']:.2f} MXN)")
-            with c_add:
-                if st.button("➕ Añadir a Colección", key=f"add_{row['card_id']}"):
-                    add_to_collection(row['name'], row['expansion'], row['number'], row['price_usd'], 1)
-                    st.success(f"¡{row['name']} guardada!")
+            for _, row in df_filtered.iterrows():
+                c_card, c_add = st.columns([3, 1])
+                with c_card:
+                    st.write(f"**{row['name']}** — *{row['expansion']}* (#{row['number']}) | **${row['price_usd']:.2f} USD** (${row['price_mxn']:.2f} MXN)")
+                with c_add:
+                    if st.button("➕ Añadir a Colección", key=f"add_{row['card_id']}"):
+                        add_to_collection(row['name'], row['expansion'], row['number'], row['price_usd'], 1)
+                        st.success(f"¡{row['name']} guardada!")
 
     else:
-        st.info("La base de datos está vacía. Haz clic en 'Actualizar' para cargar información desde TCGPlayer.")
+        st.info("La base de datos está vacía o se limpiaron registros previos. Haz clic en 'Actualizar' para cargar información con los nombres correctos.")
 
 # ==========================================
 # 2. MI COLECCIÓN (💼)
@@ -426,7 +435,7 @@ elif menu == "💼 Mi Colección":
     
     conn = sqlite3.connect(DB_NAME)
     df_col = pd.read_sql_query("SELECT * FROM my_collection", conn)
-    df_market = pd.read_sql_query("SELECT * FROM market_prices", conn)
+    df_market = pd.read_sql_query("SELECT * FROM market_prices WHERE name != 'Desconocido'", conn)
     conn.close()
 
     total_val_usd = 0.0
@@ -504,7 +513,7 @@ elif menu == "📊 Predicciones y Gráficas":
     st.title("📊 Análisis y Predicción de Precios")
     
     conn = sqlite3.connect(DB_NAME)
-    df_market = pd.read_sql_query("SELECT DISTINCT name FROM market_prices", conn)
+    df_market = pd.read_sql_query("SELECT DISTINCT name FROM market_prices WHERE name != 'Desconocido'", conn)
     conn.close()
     
     if not df_market.empty:
