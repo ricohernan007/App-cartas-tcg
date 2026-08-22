@@ -40,7 +40,7 @@ st.markdown("""
 DB_NAME = "pokemon_tcg.db"
 
 # ==========================================
-# GESTIÓN DE BASE DE DATOS (SQLITE)
+# GESTIÓN DE BASE DE DATOS Y MIGRACIÓN AUTOMÁTICA
 # ==========================================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -70,6 +70,13 @@ def init_db():
             quantity INTEGER
         )
     """)
+    
+    # Migración automática si existe la tabla previa con la columna en USD
+    cursor.execute("PRAGMA table_info(my_collection)")
+    columns = [column[1] for column in cursor.fetchall()]
+    
+    if "purchase_price_usd" in columns and "purchase_price_mxn" not in columns:
+        cursor.execute("ALTER TABLE my_collection RENAME COLUMN purchase_price_usd TO purchase_price_mxn")
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS exchange_rates (
