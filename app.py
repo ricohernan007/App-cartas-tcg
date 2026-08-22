@@ -165,7 +165,6 @@ class TCGPlayerScraper:
                 for item in data.get("results", [{}])[0].get("results", []):
                     card_id = str(item.get("productId", ""))
                     
-                    # Extracción exhaustiva de nombre real
                     name = (
                         item.get("cleanName") or 
                         item.get("productName") or 
@@ -190,7 +189,7 @@ class TCGPlayerScraper:
                             "card_id": card_id,
                             "name": name,
                             "expansion": expansion,
-                            "number": number,
+                            "number": str(number).strip(),
                             "price_usd": price
                         })
                 return results
@@ -219,20 +218,31 @@ def update_market_cache(query="Charizard", proxies=None):
             INSERT OR REPLACE INTO market_prices 
             (card_id, name, expansion, number, price_usd, price_mxn, date)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (card["card_id"], card["name"], card["expansion"], card["number"], card["price_usd"], price_mxn, today_str))
+        """, (card["card_id"], card["name"], card["expansion"], str(card["number"]), card["price_usd"], price_mxn, today_str))
         inserted += 1
         
     conn.commit()
     conn.close()
     return inserted
 
-def add_to_collection(name, expansion, number, price_usd, quantity=1):
+def add_to_collection(name, expansion, number, purchase_price_usd, quantity=1):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO my_collection (name, expansion, number, purchase_price_usd, quantity)
         VALUES (?, ?, ?, ?, ?)
-    """, (name, expansion, number, price_usd, quantity))
+    """, (name, expansion, str(number), purchase_price_usd, quantity))
+    conn.commit()
+    conn.close()
+
+def update_collection_item(item_id, purchase_price_usd, quantity):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE my_collection 
+        SET purchase_price_usd = ?, quantity = ?
+        WHERE id = ?
+    """, (purchase_price_usd, quantity, item_id))
     conn.commit()
     conn.close()
 
@@ -325,7 +335,6 @@ menu = st.sidebar.radio(
     index=0
 )
 
-# Inicialización de variables de sesión
 if "ntfy_topic" not in st.session_state:
     st.session_state["ntfy_topic"] = "mis_alertas_pokemon_123"
 if "alert_threshold" not in st.session_state:
@@ -362,15 +371,12 @@ if menu == "🏠 Dashboard de Mercado":
     conn.close()
 
     if not df_market.empty:
-        # Filtrar registros antiguos o con 'Desconocido'
         df_market = df_market[df_market["name"] != "Desconocido"]
-        
         latest_date = df_market["date"].max() if not df_market.empty else None
         
         if latest_date:
             df_latest = df_market[df_market["date"] == latest_date].copy()
             
-            # Asignación de cambio porcentual para visualización si solo hay 1 captura
             np.random.seed(42)
             df_latest["pct_change"] = np.random.uniform(-8.0, 8.0, size=len(df_latest))
             
@@ -383,7 +389,7 @@ if menu == "🏠 Dashboard de Mercado":
             for idx, (_, row) in enumerate(top_up.iterrows()):
                 if idx < 2:
                     cols[idx].metric(
-                        label=f"{row['name']} ({row['expansion']})",
+                        label=f"{row['name']} ({row['expansion']}) #{row['number']}",
                         value=f"${row['price_usd']:.2f} USD",
                         delta=f"+{row['pct_change']:.1f}% (${row['price_mxn']:.2f} MXN)"
                     )
@@ -394,117 +400,155 @@ if menu == "🏠 Dashboard de Mercado":
             for idx, (_, row) in enumerate(top_down.iterrows()):
                 if idx < 2:
                     cols_down[idx].metric(
-                        label=f"{row['name']} ({row['expansion']})",
+                        label=f"{row['name']} ({row['expansion']}) #{row['number']}",
                         value=f"${row['price_usd']:.2f} USD",
                         delta=f"{row['pct_change']:.1f}% (${row['price_mxn']:.2f} MXN)"
                     )
 
             st.markdown("---")
-            st.subheader("📋 Resultados / Cartas en Caché")
+            st.subheader("📋 Búsqueda y Filtro de Cartas")
             
-            col_f1, col_f2 = st.columns(2)
+            col_f1, col_f2, col_f3 = st.columns([1.5, 1.5, 1])
             with col_f1:
-                all_expansions = ["Todas"] + sorted(df_latest["expansion"].unique().tolist())
-                selected_exp = st.selectbox("Filtrar por Expansión / Set", all_expansions)
+                filter_text = st.text_input("🔍 Nombre de la Carta", value="", placeholder="Ej. Charizard, Pikachu...")
             with col_f2:
-                filter_text = st.text_input("Filtrar por Nombre de Carta", value="")
+                all_expansions = ["Todas"] + sorted(df_latest["expansion"].unique().tolist())
+                selected_exp = st.selectbox("📦 Expansión / Set", all_expansions)
+            with col_f3:
+                filter_number = st.text_input("🔢 Número de Carta", value="", placeholder="Ej. 004, 151, TG05")
 
             df_filtered = df_latest.copy()
             if selected_exp != "Todas":
                 df_filtered = df_filtered[df_filtered["expansion"] == selected_exp]
             if filter_text:
                 df_filtered = df_filtered[df_filtered["name"].str.contains(filter_text, case=False, na=False)]
+            if filter_number:
+                num_clean = filter_number.strip()
+                df_filtered = df_filtered[df_filtered["number"].astype(str).str.contains(num_clean, case=False, na=False)]
 
+            st.write(f"Mostrando **{len(df_filtered)}** resultados:")
             for _, row in df_filtered.iterrows():
-                c_card, c_add = st.columns([3, 1])
+                c_card, c_price_input, c_add = st.columns([2.5, 1.2, 1])
                 with c_card:
-                    st.write(f"**{row['name']}** — *{row['expansion']}* (#{row['number']}) | **${row['price_usd']:.2f} USD** (${row['price_mxn']:.2f} MXN)")
+                    st.write(f"**{row['name']}** — *{row['expansion']}* (#{row['number']}) | Mercado: **${row['price_usd']:.2f} USD** (${row['price_mxn']:.2f} MXN)")
+                with c_price_input:
+                    user_cost = st.number_input("Precio compra ($ USD)", min_value=0.0, value=float(row['price_usd']), step=0.5, key=f"cost_{row['card_id']}")
                 with c_add:
-                    if st.button("➕ Añadir a Colección", key=f"add_{row['card_id']}"):
-                        add_to_collection(row['name'], row['expansion'], row['number'], row['price_usd'], 1)
-                        st.success(f"¡{row['name']} guardada!")
+                    st.write("")
+                    if st.button("➕ Añadir", key=f"add_{row['card_id']}"):
+                        add_to_collection(row['name'], row['expansion'], row['number'], user_cost, 1)
+                        st.success(f"¡Guardada a ${user_cost:.2f} USD!")
 
     else:
-        st.info("La base de datos está vacía o se limpiaron registros previos. Haz clic en 'Actualizar' para cargar información con los nombres correctos.")
+        st.info("La base de datos está vacía. Haz clic en 'Actualizar' para cargar información.")
 
 # ==========================================
 # 2. MI COLECCIÓN (💼)
 # ==========================================
 elif menu == "💼 Mi Colección":
-    st.title("💼 Mi Inventario Personal")
+    st.title("💼 Mi Inventario Personal & Balance de Ganancias")
     
     conn = sqlite3.connect(DB_NAME)
     df_col = pd.read_sql_query("SELECT * FROM my_collection", conn)
-    df_market = pd.read_sql_query("SELECT * FROM market_prices WHERE name != 'Desconocido'", conn)
+    df_market = pd.read_sql_query("SELECT * FROM market_prices WHERE name != 'Desconocido' ORDER BY date DESC", conn)
     conn.close()
 
-    total_val_usd = 0.0
+    total_market_val_usd = 0.0
     total_cost_usd = 0.0
     
     if not df_col.empty:
+        collection_details = []
         for _, row in df_col.iterrows():
-            cost = row["purchase_price_usd"] * row["quantity"]
-            total_cost_usd += cost
+            cost_total = row["purchase_price_usd"] * row["quantity"]
+            total_cost_usd += cost_total
             
+            # Coincidencia por nombre y número de carta
             match = df_market[df_market["name"].str.contains(row["name"], case=False, na=False)]
-            if not match.empty:
-                current_price = match.iloc[0]["price_usd"]
-            else:
-                current_price = row["purchase_price_usd"]
-                
-            total_val_usd += current_price * row["quantity"]
+            if not match.empty and str(row["number"]).strip() != "N/A":
+                match_num = match[match["number"].astype(str).str.contains(str(row["number"]).strip(), case=False, na=False)]
+                if not match_num.empty:
+                    match = match_num
+
+            current_unit_price = match.iloc[0]["price_usd"] if not match.empty else row["purchase_price_usd"]
+            current_total_val = current_unit_price * row["quantity"]
+            total_market_val_usd += current_total_val
             
-        net_profit_usd = total_val_usd - total_cost_usd
+            diff_unit_usd = current_unit_price - row["purchase_price_usd"]
+            diff_total_usd = current_total_val - cost_total
+            diff_pct = ((diff_unit_usd / row["purchase_price_usd"]) * 100) if row["purchase_price_usd"] > 0 else 0.0
+
+            collection_details.append({
+                "id": row["id"],
+                "name": row["name"],
+                "expansion": row["expansion"],
+                "number": row["number"],
+                "purchase_price_usd": row["purchase_price_usd"],
+                "quantity": row["quantity"],
+                "current_unit_price": current_unit_price,
+                "diff_unit_usd": diff_unit_usd,
+                "diff_total_usd": diff_total_usd,
+                "diff_pct": diff_pct
+            })
+
+        net_profit_usd = total_market_val_usd - total_cost_usd
         net_profit_mxn = net_profit_usd * mxn_rate
-        pct_return = ((net_profit_usd / total_cost_usd) * 100) if total_cost_usd > 0 else 0
+        pct_return = ((net_profit_usd / total_cost_usd) * 100) if total_cost_usd > 0 else 0.0
 
-        st.markdown("""
-            <div style="background-color:#0e1117; padding:15px; border-radius:10px; border:2px solid #2e3440; margin-bottom:20px;">
-                <h3 style="margin:0; color:#ffffff;">Valor Total Estimado</h3>
-                <h1 style="margin:0; color:#00e676;">${:.2f} USD <span style="font-size:1.2rem; color:#b0bec5;">(${:.2f} MXN)</span></h1>
-                <p style="margin:0; font-size:1.1rem;">Rendimiento Neto: <strong style="color:{};">${:+.2f} USD (${:+.2f} MXN) [{:+.1f}%]</strong></p>
-            </div>
-        """.format(
-            total_val_usd,
-            total_val_usd * mxn_rate,
-            "#00e676" if net_profit_usd >= 0 else "#ff5252",
-            net_profit_usd,
-            net_profit_mxn,
-            pct_return
-        ), unsafe_allow_html=True)
+        c_met1, c_met2, c_met3 = st.columns(3)
+        c_met1.metric("Valor Actual de Mercado", f"${total_market_val_usd:.2f} USD", f"${total_market_val_usd*mxn_rate:.2f} MXN")
+        c_met2.metric("Inversión / Costo Total", f"${total_cost_usd:.2f} USD", f"${total_cost_usd*mxn_rate:.2f} MXN")
+        c_met3.metric(
+            "Ganancia / Pérdida Neta", 
+            f"${net_profit_usd:+.2f} USD", 
+            delta=f"{pct_return:+.1f}% (${net_profit_mxn:+.2f} MXN)"
+        )
 
-    with st.expander("➕ / ✏️ Agregar Manualmente a Colección", expanded=df_col.empty):
-        with st.form("form_collection"):
+        st.markdown("---")
+        st.subheader("📋 Detalle de Cartas e Inversión")
+
+        for item in collection_details:
+            color = "#00e676" if item["diff_total_usd"] >= 0 else "#ff5252"
+            status_text = f"📈 Ganancia: +${item['diff_total_usd']:.2f} USD ({item['diff_pct']:+.1f}%)" if item["diff_total_usd"] >= 0 else f"📉 Pérdida: ${item['diff_total_usd']:.2f} USD ({item['diff_pct']:+.1f}%)"
+            
+            with st.expander(f"**{item['name']}** ({item['expansion']} #{item['number']}) — {status_text}"):
+                c1, c2, c3 = st.columns([2, 2, 1])
+                with c1:
+                    st.write(f"**Mercado Actual (Unidad):** ${item['current_unit_price']:.2f} USD (${item['current_unit_price']*mxn_rate:.2f} MXN)")
+                    st.write(f"**Diferencia por Unidad:** <span style='color:{color}; font-weight:bold;'>${item['diff_unit_usd']:+.2f} USD ({item['diff_pct']:+.1f}%)</span>", unsafe_allow_html=True)
+                with c2:
+                    with st.form(f"edit_form_{item['id']}"):
+                        new_cost = st.number_input("Precio compra propio ($ USD)", min_value=0.0, value=float(item["purchase_price_usd"]), step=0.5)
+                        new_qty = st.number_input("Cantidad", min_value=1, value=int(item["quantity"]), step=1)
+                        if st.form_submit_button("💾 Guardar Cambios"):
+                            update_collection_item(item['id'], new_cost, new_qty)
+                            st.success("¡Precio actualizado!")
+                            st.rerun()
+                with c3:
+                    st.write("")
+                    if st.button("🗑️ Eliminar", key=f"del_col_{item['id']}"):
+                        conn = sqlite3.connect(DB_NAME)
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM my_collection WHERE id=?", (item['id'],))
+                        conn.commit()
+                        conn.close()
+                        st.rerun()
+
+    with st.expander("➕ Agregar Carta Manualmente a Colección", expanded=df_col.empty):
+        with st.form("form_add_manual"):
             c1, c2 = st.columns(2)
             with c1:
                 col_name = st.text_input("Nombre de la Carta")
                 col_exp = st.text_input("Expansión / Set")
-                col_num = st.text_input("Código / Número (ej. 004/102)")
+                col_num = st.text_input("Código / Número (ej. 004/102 o 151)")
             with c2:
-                col_price = st.number_input("Precio de Compra (USD)", min_value=0.0, step=0.5)
-                col_qty = st.number_input("Cantidad", min_value=1, step=1)
+                col_price = st.number_input("Precio al que la compraste/conseguiste (USD)", min_value=0.0, step=0.5)
+                col_qty = st.number_input("Cantidad", min_value=1, value=1, step=1)
                 
-            submit = st.form_submit_button("Guardar en Colección")
-            
+            submit = st.form_submit_button("Guardar en Mi Colección")
             if submit and col_name:
                 add_to_collection(col_name, col_exp, col_num, col_price, col_qty)
-                st.success(f"{col_name} se ha guardado en tu colección.")
+                st.success(f"¡{col_name} agregada con costo de ${col_price:.2f} USD!")
                 st.rerun()
-
-    if not df_col.empty:
-        st.subheader("Cartas Guardadas")
-        for idx, row in df_col.iterrows():
-            c_info, c_del = st.columns([4, 1])
-            with c_info:
-                st.write(f"**{row['name']}** ({row['expansion']} #{row['number']}) - Cantidad: {row['quantity']} | Compra: ${row['purchase_price_usd']:.2f} USD (${row['purchase_price_usd']*mxn_rate:.2f} MXN)")
-            with c_del:
-                if st.button("🗑️ Eliminar", key=f"del_{row['id']}"):
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM my_collection WHERE id=?", (row['id'],))
-                    conn.commit()
-                    conn.close()
-                    st.rerun()
 
 # ==========================================
 # 3. PREDICCIONES Y GRÁFICAS (📊)
@@ -534,7 +578,6 @@ elif menu == "📊 Predicciones y Gráficas":
             })
 
         st.subheader(f"Histórico de Precios: {selected_card}")
-        
         moneda = st.radio("Moneda de la Gráfica:", ["USD ($)", "MXN ($)"], horizontal=True)
         col_price = "price_usd" if "USD" in moneda else "price_mxn"
         
