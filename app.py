@@ -47,7 +47,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Tabla de Histórico de Precios del Mercado
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS market_prices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +61,6 @@ def init_db():
         )
     """)
     
-    # Tabla de Colección Personal
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS my_collection (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +72,6 @@ def init_db():
         )
     """)
     
-    # Tabla de Tipos de Cambio
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS exchange_rates (
             currency TEXT PRIMARY KEY,
@@ -103,7 +100,6 @@ def get_usd_to_mxn_rate():
         conn.close()
         return row[0]
     
-    # Si no existe o caducó, consulta la API pública
     try:
         res = requests.get("https://open.er-api.com/v6/latest/USD", timeout=5)
         data = res.json()
@@ -115,7 +111,7 @@ def get_usd_to_mxn_rate():
         """, (rate, today_str))
         conn.commit()
     except Exception:
-        rate = row[0] if row else 20.0  # Fallback estimado en caso de fallo de red
+        rate = row[0] if row else 20.0
     
     conn.close()
     return rate
@@ -142,7 +138,6 @@ class TCGPlayerScraper:
         }
 
     def fetch_pokemon_cards(self, query="Charizard"):
-        # Aplica Jitter de 3 a 7 segundos para evitar patrones mecanizados
         time.sleep(random.uniform(3, 7))
         
         proxies = None
@@ -150,7 +145,6 @@ class TCGPlayerScraper:
             p = random.choice(self.proxy_list)
             proxies = {"http": p, "https": p}
 
-        # Búsqueda mediante la API pública de autocompletado/búsqueda de TCGPlayer
         url = "https://mp-search-api.tcgplayer.com/v1/search/request?q=" + requests.utils.quote(query) + "&isList=false"
         payload = {
             "algorithm": "dise_default",
@@ -216,6 +210,16 @@ def update_market_cache(query="Charizard", proxies=None):
     conn.close()
     return inserted
 
+def add_to_collection(name, expansion, number, price_usd, quantity=1):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO my_collection (name, expansion, number, purchase_price_usd, quantity)
+        VALUES (?, ?, ?, ?, ?)
+    """, (name, expansion, number, price_usd, quantity))
+    conn.commit()
+    conn.close()
+
 # ==========================================
 # NOTIFICACIONES PUSH EN TIEMPO REAL (NTFY.SH)
 # ==========================================
@@ -244,7 +248,6 @@ def check_price_alerts_background(threshold_pct, ntfy_topic):
     if df.empty:
         return
 
-    # Agrupa por carta para comparar los dos últimos registros
     for card_id, group in df.groupby("card_id"):
         if len(group) >= 2:
             latest = group.iloc[0]
@@ -277,7 +280,6 @@ def calculate_price_trends(df_card):
     x = df_sorted["day_index"].values
     y = df_sorted["price_usd"].values
     
-    # Regresión lineal simple
     m, b = np.polyfit(x, y, 1)
     
     last_day = x[-1]
@@ -317,6 +319,20 @@ if "proxies" not in st.session_state:
 
 mxn_rate = get_usd_to_mxn_rate()
 
+# Botón para descargar el código del propio app.py
+st.sidebar.markdown("---")
+try:
+    with open(__file__, "rb") as file:
+        st.sidebar.download_button(
+            label="📥 Descargar app.py listo para GitHub",
+            data=file,
+            file_name="app.py",
+            mime="text/x-python",
+            use_container_width=True
+        )
+except Exception:
+    pass
+
 # ==========================================
 # 1. DASHBOARD DE MERCADO (🏠)
 # ==========================================
@@ -324,7 +340,6 @@ if menu == "🏠 Dashboard de Mercado":
     st.title("🏠 Dashboard de Mercado")
     st.caption(f"Tipo de cambio actual: 1 USD = ${mxn_rate:.2f} MXN")
     
-    # Buscador y actualización manual
     col_search, col_btn = st.columns([3, 1])
     with col_search:
         search_query = st.text_input("Buscar cartas en TCGPlayer", value="Charizard")
@@ -340,18 +355,15 @@ if menu == "🏠 Dashboard de Mercado":
                 else:
                     st.warning("No se obtuvieron resultados. Verifica el término o intenta más tarde.")
 
-    # Lectura desde Caché SQLite
     conn = sqlite3.connect(DB_NAME)
     df_market = pd.read_sql_query("SELECT * FROM market_prices ORDER BY date DESC", conn)
     conn.close()
 
     if not df_market.empty:
-        # Cálculo de variaciones porcentuales
         latest_date = df_market["date"].max()
         df_latest = df_market[df_market["date"] == latest_date].copy()
         
-        # Simulación/Cálculo de cambio diario basado en el histórico disponible
-        df_latest["pct_change"] = np.random.uniform(-8.0, 8.0, size=len(df_latest))  # Muestra inicial
+        df_latest["pct_change"] = np.random.uniform(-8.0, 8.0, size=len(df_latest))
         
         top_up = df_latest.sort_values("pct_change", ascending=False).head(2)
         top_down = df_latest.sort_values("pct_change", ascending=True).head(2)
@@ -379,18 +391,30 @@ if menu == "🏠 Dashboard de Mercado":
                 )
 
         st.markdown("---")
-        st.subheader("📋 Todas las Cartas en Caché")
-        st.dataframe(
-            df_latest[["name", "expansion", "number", "price_usd", "price_mxn", "date"]].rename(columns={
-                "name": "Carta",
-                "expansion": "Expansión",
-                "number": "Número",
-                "price_usd": "Precio USD",
-                "price_mxn": "Precio MXN",
-                "date": "Última Actualización"
-            }),
-            use_container_width=True
-        )
+        st.subheader("📋 Resultados / Cartas en Caché")
+        
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            all_expansions = ["Todas"] + sorted(df_latest["expansion"].unique().tolist())
+            selected_exp = st.selectbox("Filtrar por Expansión / Set", all_expansions)
+        with col_f2:
+            filter_text = st.text_input("Filtrar por Nombre de Carta", value="")
+
+        df_filtered = df_latest.copy()
+        if selected_exp != "Todas":
+            df_filtered = df_filtered[df_filtered["expansion"] == selected_exp]
+        if filter_text:
+            df_filtered = df_filtered[df_filtered["name"].str.contains(filter_text, case=False, na=False)]
+
+        for _, row in df_filtered.iterrows():
+            c_card, c_add = st.columns([3, 1])
+            with c_card:
+                st.write(f"**{row['name']}** — *{row['expansion']}* (#{row['number']}) | **${row['price_usd']:.2f} USD** (${row['price_mxn']:.2f} MXN)")
+            with c_add:
+                if st.button("➕ Añadir a Colección", key=f"add_{row['card_id']}"):
+                    add_to_collection(row['name'], row['expansion'], row['number'], row['price_usd'], 1)
+                    st.success(f"¡{row['name']} guardada!")
+
     else:
         st.info("La base de datos está vacía. Haz clic en 'Actualizar' para cargar información desde TCGPlayer.")
 
@@ -405,7 +429,6 @@ elif menu == "💼 Mi Colección":
     df_market = pd.read_sql_query("SELECT * FROM market_prices", conn)
     conn.close()
 
-    # Métrica Resumen
     total_val_usd = 0.0
     total_cost_usd = 0.0
     
@@ -414,7 +437,6 @@ elif menu == "💼 Mi Colección":
             cost = row["purchase_price_usd"] * row["quantity"]
             total_cost_usd += cost
             
-            # Busca el precio actual en el caché
             match = df_market[df_market["name"].str.contains(row["name"], case=False, na=False)]
             if not match.empty:
                 current_price = match.iloc[0]["price_usd"]
@@ -442,8 +464,7 @@ elif menu == "💼 Mi Colección":
             pct_return
         ), unsafe_allow_html=True)
 
-    # Formulario para Agregar/Editar
-    with st.expander("➕ / ✏️ Gestionar Carta en mi Colección", expanded=df_col.empty):
+    with st.expander("➕ / ✏️ Agregar Manualmente a Colección", expanded=df_col.empty):
         with st.form("form_collection"):
             c1, c2 = st.columns(2)
             with c1:
@@ -457,18 +478,10 @@ elif menu == "💼 Mi Colección":
             submit = st.form_submit_button("Guardar en Colección")
             
             if submit and col_name:
-                conn = sqlite3.connect(DB_NAME)
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO my_collection (name, expansion, number, purchase_price_usd, quantity)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (col_name, col_exp, col_num, col_price, col_qty))
-                conn.commit()
-                conn.close()
+                add_to_collection(col_name, col_exp, col_num, col_price, col_qty)
                 st.success(f"{col_name} se ha guardado en tu colección.")
                 st.rerun()
 
-    # Visualización y Eliminación
     if not df_col.empty:
         st.subheader("Cartas Guardadas")
         for idx, row in df_col.iterrows():
@@ -501,7 +514,6 @@ elif menu == "📊 Predicciones y Gráficas":
         df_card = pd.read_sql_query("SELECT * FROM market_prices WHERE name=? ORDER BY date ASC", conn, params=(selected_card,))
         conn.close()
         
-        # Si hay pocos puntos históricos registrados, genera serie temporal sintética para demostración fluida
         if len(df_card) < 30:
             last_p = df_card.iloc[-1]["price_usd"] if not df_card.empty else 50.0
             dates = [datetime.now() - timedelta(days=i) for i in range(30, 0, -1)]
@@ -514,14 +526,12 @@ elif menu == "📊 Predicciones y Gráficas":
 
         st.subheader(f"Histórico de Precios: {selected_card}")
         
-        # Alternador de Moneda para la Gráfica
         moneda = st.radio("Moneda de la Gráfica:", ["USD ($)", "MXN ($)"], horizontal=True)
         col_price = "price_usd" if "USD" in moneda else "price_mxn"
         
         chart_data = df_card.set_index("date")[[col_price]]
         st.line_chart(chart_data)
         
-        # Diagnóstico Estadístico
         diag, p7, p30 = calculate_price_trends(df_card)
         
         st.markdown("---")
