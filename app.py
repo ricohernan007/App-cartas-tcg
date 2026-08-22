@@ -27,7 +27,10 @@ from datetime import datetime, timedelta
 # ----------------------------------------------------------------------------
 
 DB_PATH = "pokemon_tcg.db"
-API_BASE = "https://api.pokemontcg.io/v2/cards"
+API_CARDS = "https://api.pokemontcg.io/v2/cards"
+API_SETS = "https://api.pokemontcg.io/v2/sets"
+EXCHANGE_RATE_API = "https://open.er-api.com/v6/latest/USD"  # gratuita, sin API key
+FALLBACK_USD_TO_MXN = 18.5  # se usa solo si la API de tipo de cambio no responde
 BACKGROUND_CHECK_INTERVAL_SECONDS = 3 * 60 * 60  # cada 3 horas
 
 # Lista curada de cartas populares para el Dashboard de mercado.
@@ -190,6 +193,38 @@ def get_collection():
 
 
 # ----------------------------------------------------------------------------
+# TIPO DE CAMBIO USD -> MXN
+# ----------------------------------------------------------------------------
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)  # se refresca cada 6 horas
+def get_usd_to_mxn_rate():
+    try:
+        resp = requests.get(EXCHANGE_RATE_API, timeout=10)
+        resp.raise_for_status()
+        rate = resp.json().get("rates", {}).get("MXN")
+        if rate:
+            return float(rate)
+    except requests.RequestException:
+        pass
+    return FALLBACK_USD_TO_MXN
+
+
+def format_dual_price(usd_price):
+    """Devuelve el precio formateado en MXN (principal) y USD (referencia)."""
+    if usd_price is None:
+        return "N/D"
+    rate = get_usd_to_mxn_rate()
+    mxn_price = usd_price * rate
+    return f"${mxn_price:,.2f} MXN (${usd_price:,.2f} USD)"
+
+
+def to_mxn(usd_price):
+    if usd_price is None:
+        return None
+    return usd_price * get_usd_to_mxn_rate()
+
+
+# ----------------------------------------------------------------------------
 # INTEGRACIÓN CON LA API DE pokemontcg.io
 # ----------------------------------------------------------------------------
 
@@ -208,12 +243,27 @@ def _extract_market_price(card_json):
     return None, None
 
 
+def _card_json_to_dict(card):
+    price, price_source = _extract_market_price(card)
+    return {
+        "id": card.get("id"),
+        "name": card.get("name"),
+        "set": card.get("set", {}).get("name"),
+        "set_id": card.get("set", {}).get("id"),
+        "number": card.get("number"),
+        "image": card.get("images", {}).get("small"),
+        "price": price,
+        "price_source": price_source,
+    }
+
+
 @st.cache_data(ttl=BACKGROUND_CHECK_INTERVAL_SECONDS, show_spinner=False)
 def fetch_card_from_api(card_name):
-    """Busca una carta por nombre en pokemontcg.io y devuelve su info + precio."""
+    """Busca una carta por nombre en pokemontcg.io y devuelve su info + precio
+    (usa la impresión/expansión más reciente que encuentre)."""
     try:
         resp = requests.get(
-            API_BASE,
+            API_CARDS,
             params={"q": f'name:"{card_name}"', "orderBy": "-set.releaseDate", "pageSize": 1},
             timeout=15,
         )
@@ -221,18 +271,44 @@ def fetch_card_from_api(card_name):
         data = resp.json().get("data", [])
         if not data:
             return None
-        card = data[0]
-        price, price_source = _extract_market_price(card)
-        return {
-            "name": card.get("name"),
-            "set": card.get("set", {}).get("name"),
-            "number": card.get("number"),
-            "image": card.get("images", {}).get("small"),
-            "price": price,
-            "price_source": price_source,
-        }
+        return _card_json_to_dict(data[0])
     except requests.RequestException:
         return None
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def fetch_all_sets():
+    """Devuelve la lista completa de expansiones/sets existentes en pokemontcg.io."""
+    try:
+        resp = requests.get(API_SETS, params={"orderBy": "-releaseDate"}, timeout=15)
+        resp.raise_for_status()
+        return resp.json().get("data", [])
+    except requests.RequestException:
+        return []
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def search_cards(name_query=None, set_id=None, page_size=20):
+    """Busca cartas en TODAS las expansiones existentes, opcionalmente filtrando
+    por nombre y/o por una expansión específica. Devuelve precio real de mercado
+    de cada resultado."""
+    query_parts = []
+    if name_query:
+        query_parts.append(f'name:"*{name_query}*"')
+    if set_id:
+        query_parts.append(f'set.id:{set_id}')
+
+    params = {"pageSize": page_size, "orderBy": "-set.releaseDate"}
+    if query_parts:
+        params["q"] = " ".join(query_parts)
+
+    try:
+        resp = requests.get(API_CARDS, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        return [_card_json_to_dict(c) for c in data]
+    except requests.RequestException:
+        return []
 
 
 def refresh_market_watchlist():
@@ -240,7 +316,7 @@ def refresh_market_watchlist():
     en el histórico. Pensado para llamarse periódicamente, no en cada rerun."""
     results = []
     for name in MARKET_WATCHLIST:
-        info = fetch_card_from_api.__wrapped__(name)  # bypass cache for the refresh job
+        info = fetch_card_from_api.__wrapped__(name)  # se salta la caché para el refresco periódico
         if info and info["price"] is not None:
             save_price_point(info["name"], info["set"], info["price"])
             results.append(info)
@@ -277,9 +353,10 @@ def check_and_alert(card_name, set_name, threshold_pct, channel):
     change_pct = ((latest - previous) / previous) * 100
     if abs(change_pct) >= threshold_pct:
         direction = "📈" if change_pct > 0 else "📉"
+        rate = get_usd_to_mxn_rate()
         msg = (
             f"[Pokémon TCG] ¡Alerta de Precio! {direction} La carta {card_name} "
-            f"({set_name}) ha cambiado de ${previous:.2f} a ${latest:.2f} "
+            f"({set_name}) ha cambiado de ${previous*rate:,.2f} a ${latest*rate:,.2f} MXN "
             f"({change_pct:+.1f}%)."
         )
         send_ntfy_notification(channel, "Alerta de precio Pokémon TCG", msg)
@@ -382,20 +459,28 @@ def page_dashboard():
     gainers = sorted(changes, key=lambda c: c["pct"], reverse=True)[:3]
     losers = sorted(changes, key=lambda c: c["pct"])[:3]
 
+    rate = get_usd_to_mxn_rate()
+    st.caption(f"Tipo de cambio actual: 1 USD ≈ ${rate:.2f} MXN")
+
     st.subheader("Top Subidas 🔥")
     cols = st.columns(len(gainers)) if gainers else []
     for col, c in zip(cols, gainers):
-        col.metric(c["name"], f"${c['latest']:.2f}", f"{c['pct']:+.1f}%")
+        col.metric(c["name"], f"${c['latest']*rate:,.2f} MXN", f"{c['pct']:+.1f}%")
 
     st.subheader("Top Bajadas 📉")
     cols = st.columns(len(losers)) if losers else []
     for col, c in zip(cols, losers):
-        col.metric(c["name"], f"${c['latest']:.2f}", f"{c['pct']:+.1f}%")
+        col.metric(c["name"], f"${c['latest']*rate:,.2f} MXN", f"{c['pct']:+.1f}%")
 
     st.divider()
     st.subheader("Todas las cartas monitoreadas")
+    table_df = pd.DataFrame(changes)
+    table_df["precio_mxn"] = table_df["latest"] * rate
+    table_df = table_df.rename(columns={
+        "name": "Carta", "latest": "Precio (USD)", "precio_mxn": "Precio (MXN)", "pct": "% cambio",
+    })[["Carta", "Precio (MXN)", "Precio (USD)", "% cambio"]]
     st.dataframe(
-        pd.DataFrame(changes).rename(columns={"name": "Carta", "latest": "Precio", "pct": "% cambio"}),
+        table_df.style.format({"Precio (MXN)": "${:,.2f}", "Precio (USD)": "${:,.2f}", "% cambio": "{:+.1f}%"}),
         use_container_width=True,
         hide_index=True,
     )
@@ -409,33 +494,75 @@ def page_collection():
     st.title("💼 Mi Colección")
 
     collection = get_collection()
+    rate = get_usd_to_mxn_rate()
 
-    total_value = 0.0
-    total_cost = 0.0
+    total_value_usd = 0.0
+    total_cost_usd = 0.0
     for item in collection:
         rows = get_latest_two_prices(item["name"])
         current_price = rows[0]["price"] if rows else item["purchase_price"]
-        total_value += current_price * item["quantity"]
-        total_cost += item["purchase_price"] * item["quantity"]
+        total_value_usd += current_price * item["quantity"]
+        total_cost_usd += item["purchase_price"] * item["quantity"]
 
-    net = total_value - total_cost
+    net_usd = total_value_usd - total_cost_usd
     c1, c2, c3 = st.columns(3)
-    c1.metric("Valor Actual", f"${total_value:,.2f}")
-    c2.metric("Costo Total", f"${total_cost:,.2f}")
-    c3.metric("Ganancia/Pérdida", f"${net:,.2f}", f"{(net/total_cost*100) if total_cost else 0:+.1f}%")
+    c1.metric("Valor Actual", f"${total_value_usd*rate:,.2f} MXN", help=f"${total_value_usd:,.2f} USD")
+    c2.metric("Costo Total", f"${total_cost_usd*rate:,.2f} MXN", help=f"${total_cost_usd:,.2f} USD")
+    c3.metric(
+        "Ganancia/Pérdida",
+        f"${net_usd*rate:,.2f} MXN",
+        f"{(net_usd/total_cost_usd*100) if total_cost_usd else 0:+.1f}%",
+        help=f"${net_usd:,.2f} USD",
+    )
+    st.caption(f"Tipo de cambio: 1 USD ≈ ${rate:.2f} MXN")
 
     st.divider()
 
     with st.expander("➕ Agregar carta a la colección", expanded=len(collection) == 0):
-        with st.form("add_card_form", clear_on_submit=True):
-            name = st.text_input("Nombre de la carta")
-            set_name = st.text_input("Expansión / Set")
-            card_number = st.text_input("Código / Número")
-            purchase_price = st.number_input("Precio de Compra (USD)", min_value=0.0, step=0.5)
+        st.markdown("**Paso 1: busca tu carta para traer su precio real de mercado**")
+        col_s1, col_s2 = st.columns([3, 1])
+        search_query = col_s1.text_input("Nombre de la carta a buscar", key="collection_search_box")
+        do_search = col_s2.button("🔍 Buscar", use_container_width=True)
+
+        if do_search and search_query:
+            with st.spinner("Buscando en todas las expansiones..."):
+                st.session_state["collection_search_results"] = search_cards(name_query=search_query, page_size=15)
+
+        results = st.session_state.get("collection_search_results", [])
+        if results:
+            options = {
+                f"{c['name']} — {c['set']} (#{c['number']})": c for c in results if c["price"] is not None
+            }
+            if options:
+                choice_label = st.selectbox("Resultados encontrados", list(options.keys()), key="collection_choice")
+                chosen = options[choice_label]
+                st.info(f"Precio real de mercado: **{format_dual_price(chosen['price'])}** — fuente: {chosen['price_source']}")
+                if st.button("Usar esta carta para llenar el formulario", use_container_width=True):
+                    st.session_state["prefill_card"] = chosen
+                    st.rerun()
+            else:
+                st.warning("Se encontraron cartas pero ninguna tiene precio de mercado disponible ahora mismo.")
+
+        prefill = st.session_state.get("prefill_card", {})
+        st.markdown("**Paso 2: confirma o ajusta los datos**")
+        with st.form("add_card_form", clear_on_submit=False):
+            name = st.text_input("Nombre de la carta", value=prefill.get("name", ""))
+            set_name = st.text_input("Expansión / Set", value=prefill.get("set", ""))
+            card_number = st.text_input("Código / Número", value=prefill.get("number", ""))
+
+            default_price_mxn = round(to_mxn(prefill.get("price")) or 0.0, 2)
+            purchase_price_mxn = st.number_input(
+                "Precio de Compra (MXN)", min_value=0.0, step=10.0, value=default_price_mxn,
+                help="Se precarga con el precio real de mercado actual; ajústalo si pagaste otro monto.",
+            )
             quantity = st.number_input("Cantidad", min_value=1, step=1, value=1)
             submitted = st.form_submit_button("Agregar", use_container_width=True)
             if submitted and name:
-                add_collection_card(name, set_name, card_number, purchase_price, int(quantity))
+                purchase_price_usd = purchase_price_mxn / rate
+                add_collection_card(name, set_name, card_number, purchase_price_usd, int(quantity))
+                if prefill.get("price") is not None:
+                    save_price_point(name, set_name, prefill["price"])
+                st.session_state.pop("prefill_card", None)
                 st.success(f"'{name}' agregada a tu colección.")
                 st.rerun()
 
@@ -447,9 +574,14 @@ def page_collection():
         return
 
     for item in collection:
+        rows = get_latest_two_prices(item["name"])
+        current_price_usd = rows[0]["price"] if rows else item["purchase_price"]
         with st.container(border=True):
             st.markdown(f"**{item['name']}** — {item['set_name'] or 's/set'} #{item['card_number'] or '-'}")
-            st.caption(f"Compra: ${item['purchase_price']:.2f} × {item['quantity']}")
+            st.caption(
+                f"Compra: {format_dual_price(item['purchase_price'])} × {item['quantity']}  \n"
+                f"Precio actual de mercado: {format_dual_price(current_price_usd)}"
+            )
 
             edit_key = f"edit_{item['id']}"
             if st.session_state.get(edit_key):
@@ -457,11 +589,15 @@ def page_collection():
                     new_name = st.text_input("Nombre", value=item["name"])
                     new_set = st.text_input("Set", value=item["set_name"] or "")
                     new_number = st.text_input("Número", value=item["card_number"] or "")
-                    new_price = st.number_input("Precio de compra", value=float(item["purchase_price"]), min_value=0.0)
+                    new_price_mxn = st.number_input(
+                        "Precio de compra (MXN)", value=round(item["purchase_price"] * rate, 2), min_value=0.0
+                    )
                     new_qty = st.number_input("Cantidad", value=int(item["quantity"]), min_value=1, step=1)
                     col_a, col_b = st.columns(2)
                     if col_a.form_submit_button("Guardar", use_container_width=True):
-                        update_collection_card(item["id"], new_name, new_set, new_number, new_price, int(new_qty))
+                        update_collection_card(
+                            item["id"], new_name, new_set, new_number, new_price_mxn / rate, int(new_qty)
+                        )
                         st.session_state[edit_key] = False
                         st.rerun()
                     if col_b.form_submit_button("Cancelar", use_container_width=True):
@@ -475,6 +611,58 @@ def page_collection():
                 if col_b.button("🗑️ Eliminar", key=f"btn_del_{item['id']}", use_container_width=True):
                     delete_collection_card(item["id"])
                     st.rerun()
+
+
+# ----------------------------------------------------------------------------
+# UI: BUSCADOR DE CARTAS (TODAS LAS EXPANSIONES)
+# ----------------------------------------------------------------------------
+
+def page_search_all_cards():
+    st.title("🔍 Buscador de Cartas")
+    st.caption("Busca el precio real de mercado de cualquier carta, en cualquier expansión existente.")
+
+    sets_data = fetch_all_sets()
+    set_options = {"Todas las expansiones": None}
+    for s in sets_data:
+        label = f"{s.get('name')} ({s.get('series')}) — {s.get('releaseDate','')}"
+        set_options[label] = s.get("id")
+
+    col1, col2 = st.columns([2, 1])
+    name_query = col1.text_input("Nombre de la carta (opcional)", placeholder="Ej. Charizard")
+    set_label = col2.selectbox("Expansión", list(set_options.keys()))
+    set_id = set_options[set_label]
+
+    if st.button("🔍 Buscar en todas las expansiones", use_container_width=True):
+        if not name_query and not set_id:
+            st.warning("Escribe un nombre o elige una expansión específica para buscar.")
+        else:
+            with st.spinner("Consultando pokemontcg.io..."):
+                st.session_state["global_search_results"] = search_cards(
+                    name_query=name_query or None, set_id=set_id, page_size=30
+                )
+
+    results = st.session_state.get("global_search_results", [])
+    if not results:
+        st.info("Escribe el nombre de una carta y/o elige una expansión, luego presiona Buscar.")
+        return
+
+    st.subheader(f"{len(results)} resultado(s)")
+    rate = get_usd_to_mxn_rate()
+    for card in results:
+        with st.container(border=True):
+            col_img, col_info = st.columns([1, 3])
+            if card.get("image"):
+                col_img.image(card["image"], use_container_width=True)
+            with col_info:
+                st.markdown(f"**{card['name']}** — {card['set']} (#{card['number']})")
+                if card["price"] is not None:
+                    st.write(f"💰 {format_dual_price(card['price'])}")
+                    st.caption(f"Fuente: {card['price_source']}")
+                    if st.button("➕ Agregar a mi colección", key=f"add_{card['id']}"):
+                        st.session_state["prefill_card"] = card
+                        st.success("Carta lista para agregar — ve a 'Mi Colección' para confirmar.")
+                else:
+                    st.caption("Sin precio de mercado disponible por ahora.")
 
 
 # ----------------------------------------------------------------------------
@@ -498,7 +686,7 @@ def page_predictions():
             info = fetch_card_from_api(selected)
         if info and info["price"] is not None:
             save_price_point(info["name"], info["set"], info["price"])
-            st.success(f"Precio actual: ${info['price']:.2f} ({info['price_source']})")
+            st.success(f"Precio actual: {format_dual_price(info['price'])} ({info['price_source']})")
         else:
             st.warning("No se encontró precio para esa carta en este momento.")
 
@@ -508,17 +696,20 @@ def page_predictions():
         st.info("Sin histórico de precios todavía para esta carta.")
         return
 
-    chart_df = df.set_index("recorded_at")[["price"]]
-    st.line_chart(chart_df)
+    rate = get_usd_to_mxn_rate()
+    chart_df = df.set_index("recorded_at")[["price"]].rename(columns={"price": "Precio (USD)"})
+    chart_df["Precio (MXN)"] = chart_df["Precio (USD)"] * rate
+    st.line_chart(chart_df[["Precio (MXN)"]])
+    st.caption("Gráfica en pesos mexicanos (MXN). Tipo de cambio: 1 USD ≈ $%.2f MXN" % rate)
 
     trend = predict_trend(df)
     if trend:
         st.subheader("Análisis Predictivo")
         st.write(f"**{trend['diagnosis']}**")
         col1, col2 = st.columns(2)
-        col1.metric("Proyección a 7 días", f"${trend['pred_7']:.2f}")
-        col2.metric("Proyección a 30 días", f"${trend['pred_30']:.2f}")
-        st.caption(f"Variación estimada: ${trend['slope_per_day']:.3f} / día (regresión lineal simple)")
+        col1.metric("Proyección a 7 días", f"${trend['pred_7']*rate:,.2f} MXN", help=f"${trend['pred_7']:.2f} USD")
+        col2.metric("Proyección a 30 días", f"${trend['pred_30']*rate:,.2f} MXN", help=f"${trend['pred_30']:.2f} USD")
+        st.caption(f"Variación estimada: ${trend['slope_per_day']*rate:.2f} MXN / día (regresión lineal simple)")
     else:
         st.info("Se necesitan al menos 3 puntos de precio histórico para generar una predicción.")
 
@@ -587,7 +778,7 @@ def main():
     st.sidebar.title("🎴 Pokémon TCG Tracker")
     page = st.sidebar.radio(
         "Navegación",
-        ["🏠 Dashboard", "💼 Mi Colección", "📊 Predicciones", "⚙️ Alertas"],
+        ["🏠 Dashboard", "💼 Mi Colección", "🔍 Buscar Cartas", "📊 Predicciones", "⚙️ Alertas"],
         label_visibility="collapsed",
     )
 
@@ -595,6 +786,8 @@ def main():
         page_dashboard()
     elif page == "💼 Mi Colección":
         page_collection()
+    elif page == "🔍 Buscar Cartas":
+        page_search_all_cards()
     elif page == "📊 Predicciones":
         page_predictions()
     elif page == "⚙️ Alertas":
