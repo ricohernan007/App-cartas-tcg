@@ -288,27 +288,58 @@ def fetch_all_sets():
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
-def search_cards(name_query=None, set_id=None, page_size=20):
+def search_cards(name_query=None, set_id=None, page=1, page_size=250):
     """Busca cartas en TODAS las expansiones existentes, opcionalmente filtrando
-    por nombre y/o por una expansión específica. Devuelve precio real de mercado
-    de cada resultado."""
+    por nombre y/o por una expansión específica. Soporta paginación completa
+    (page_size máximo permitido por la API = 250) para poder recorrer
+    absolutamente todos los resultados de una búsqueda, no solo los primeros.
+    Devuelve (lista_de_cartas, total_count)."""
     query_parts = []
     if name_query:
         query_parts.append(f'name:"*{name_query}*"')
     if set_id:
         query_parts.append(f'set.id:{set_id}')
 
-    params = {"pageSize": page_size, "orderBy": "-set.releaseDate"}
+    params = {"pageSize": page_size, "page": page, "orderBy": "-set.releaseDate,number"}
     if query_parts:
         params["q"] = " ".join(query_parts)
 
     try:
-        resp = requests.get(API_CARDS, params=params, timeout=15)
+        resp = requests.get(API_CARDS, params=params, timeout=20)
         resp.raise_for_status()
-        data = resp.json().get("data", [])
-        return [_card_json_to_dict(c) for c in data]
+        payload = resp.json()
+        data = payload.get("data", [])
+        total_count = payload.get("totalCount", len(data))
+        return [_card_json_to_dict(c) for c in data], total_count
     except requests.RequestException:
-        return []
+        return [], 0
+
+
+def fetch_all_cards_for_query(name_query=None, set_id=None, max_cards=None, progress_callback=None):
+    """Recorre TODAS las páginas de la API hasta traer absolutamente todas las
+    cartas que coinciden con la búsqueda (o hasta max_cards, si se especifica
+    como límite de seguridad). Útil para 'traer todas las expansiones existentes'."""
+    all_cards = []
+    page = 1
+    page_size = 250  # máximo permitido por pokemontcg.io
+    total_count = None
+
+    while True:
+        batch, total_count = search_cards(name_query=name_query, set_id=set_id, page=page, page_size=page_size)
+        if not batch:
+            break
+        all_cards.extend(batch)
+        if progress_callback:
+            progress_callback(len(all_cards), total_count)
+        if max_cards and len(all_cards) >= max_cards:
+            all_cards = all_cards[:max_cards]
+            break
+        if len(all_cards) >= total_count:
+            break
+        page += 1
+        time.sleep(0.3)  # espaciar llamadas para no saturar la API pública
+
+    return all_cards, (total_count or 0)
 
 
 def refresh_market_watchlist():
@@ -526,7 +557,8 @@ def page_collection():
 
         if do_search and search_query:
             with st.spinner("Buscando en todas las expansiones..."):
-                st.session_state["collection_search_results"] = search_cards(name_query=search_query, page_size=15)
+                found, _total = search_cards(name_query=search_query, page=1, page_size=25)
+                st.session_state["collection_search_results"] = found
 
         results = st.session_state.get("collection_search_results", [])
         if results:
@@ -619,7 +651,7 @@ def page_collection():
 
 def page_search_all_cards():
     st.title("🔍 Buscador de Cartas")
-    st.caption("Busca el precio real de mercado de cualquier carta, en cualquier expansión existente.")
+    st.caption("Busca el precio real de mercado entre absolutamente todas las cartas de todas las expansiones existentes.")
 
     sets_data = fetch_all_sets()
     set_options = {"Todas las expansiones": None}
@@ -632,23 +664,59 @@ def page_search_all_cards():
     set_label = col2.selectbox("Expansión", list(set_options.keys()))
     set_id = set_options[set_label]
 
-    if st.button("🔍 Buscar en todas las expansiones", use_container_width=True):
-        if not name_query and not set_id:
-            st.warning("Escribe un nombre o elige una expansión específica para buscar.")
-        else:
-            with st.spinner("Consultando pokemontcg.io..."):
-                st.session_state["global_search_results"] = search_cards(
-                    name_query=name_query or None, set_id=set_id, page_size=30
-                )
+    if not name_query and not set_id:
+        st.warning(
+            "⚠️ Sin ningún filtro, la búsqueda recorrerá TODA la base de datos "
+            "(más de 20,000 cartas de todas las expansiones existentes). "
+            "Esto puede tardar varios minutos por el límite de peticiones de la API pública. "
+            "Para resultados más rápidos, escribe un nombre y/o elige una expansión."
+        )
+
+    if st.button("🔍 Buscar y traer TODOS los resultados", use_container_width=True):
+        progress_bar = st.progress(0.0, text="Iniciando búsqueda...")
+        status_text = st.empty()
+
+        def on_progress(fetched, total):
+            pct = min(fetched / total, 1.0) if total else 0.0
+            progress_bar.progress(pct, text=f"Descargando {fetched} de {total} cartas encontradas...")
+
+        all_cards, total_count = fetch_all_cards_for_query(
+            name_query=name_query or None,
+            set_id=set_id,
+            max_cards=None,  # sin límite: trae absolutamente todas las coincidencias
+            progress_callback=on_progress,
+        )
+        progress_bar.empty()
+        status_text.empty()
+
+        st.session_state["global_search_results"] = all_cards
+        st.session_state["global_search_total"] = total_count
 
     results = st.session_state.get("global_search_results", [])
+    total_count = st.session_state.get("global_search_total", 0)
+
     if not results:
         st.info("Escribe el nombre de una carta y/o elige una expansión, luego presiona Buscar.")
         return
 
-    st.subheader(f"{len(results)} resultado(s)")
+    st.subheader(f"{len(results)} de {total_count} carta(s) totales encontradas")
     rate = get_usd_to_mxn_rate()
-    for card in results:
+
+    with_price = [c for c in results if c["price"] is not None]
+    without_price = len(results) - len(with_price)
+    if without_price:
+        st.caption(f"{without_price} carta(s) sin precio de mercado disponible por ahora (no se muestran).")
+
+    filter_text = st.text_input("Filtrar estos resultados por texto (nombre/set)", key="results_filter")
+    display_cards = results
+    if filter_text:
+        ft = filter_text.lower()
+        display_cards = [
+            c for c in results
+            if ft in (c["name"] or "").lower() or ft in (c["set"] or "").lower()
+        ]
+
+    for card in display_cards:
         with st.container(border=True):
             col_img, col_info = st.columns([1, 3])
             if card.get("image"):
