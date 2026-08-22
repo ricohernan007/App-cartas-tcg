@@ -15,13 +15,12 @@ import streamlit as st
 # CONFIGURACIÓN INICIAL Y ESTILOS DE STREAMLIT
 # ==========================================
 st.set_page_config(
-    page_title="Pokémon TCG Monitor",
+    page_title="Pokémon TCG Monitor (MXN)",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS Mobile-First
 st.markdown("""
     <style>
         .stMetric {
@@ -67,7 +66,7 @@ def init_db():
             name TEXT,
             expansion TEXT,
             number TEXT,
-            purchase_price_usd REAL,
+            purchase_price_mxn REAL,
             quantity INTEGER
         )
     """)
@@ -111,7 +110,7 @@ def get_usd_to_mxn_rate():
         """, (rate, today_str))
         conn.commit()
     except Exception:
-        rate = row[0] if row else 20.0
+        rate = row[0] if row else 18.50
     
     conn.close()
     return rate
@@ -193,7 +192,7 @@ class TCGPlayerScraper:
                             "price_usd": price
                         })
                 return results
-        except Exception as e:
+        except Exception:
             pass
         
         return []
@@ -225,24 +224,24 @@ def update_market_cache(query="Charizard", proxies=None):
     conn.close()
     return inserted
 
-def add_to_collection(name, expansion, number, purchase_price_usd, quantity=1):
+def add_to_collection(name, expansion, number, purchase_price_mxn, quantity=1):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO my_collection (name, expansion, number, purchase_price_usd, quantity)
+        INSERT INTO my_collection (name, expansion, number, purchase_price_mxn, quantity)
         VALUES (?, ?, ?, ?, ?)
-    """, (name, expansion, str(number), purchase_price_usd, quantity))
+    """, (name, expansion, str(number), purchase_price_mxn, quantity))
     conn.commit()
     conn.close()
 
-def update_collection_item(item_id, purchase_price_usd, quantity):
+def update_collection_item(item_id, purchase_price_mxn, quantity):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         UPDATE my_collection 
-        SET purchase_price_usd = ?, quantity = ?
+        SET purchase_price_mxn = ?, quantity = ?
         WHERE id = ?
-    """, (purchase_price_usd, quantity, item_id))
+    """, (purchase_price_mxn, quantity, item_id))
     conn.commit()
     conn.close()
 
@@ -279,13 +278,13 @@ def check_price_alerts_background(threshold_pct, ntfy_topic):
             latest = group.iloc[0]
             previous = group.iloc[1]
             
-            p_old = previous["price_usd"]
-            p_new = latest["price_usd"]
+            p_old = previous["price_mxn"]
+            p_new = latest["price_mxn"]
             
             if p_old > 0:
                 change_pct = ((p_new - p_old) / p_old) * 100
                 if abs(change_pct) >= threshold_pct:
-                    msg = f"¡Alerta de Precio! La carta {latest['name']} ({latest['expansion']}) ha cambiado de ${p_old:.2f} a ${p_new:.2f} USD ({change_pct:+.1f}%)."
+                    msg = f"¡Alerta de Precio! La carta {latest['name']} ({latest['expansion']}) ha cambiado de ${p_old:.2f} MXN a ${p_new:.2f} MXN ({change_pct:+.1f}%)."
                     send_ntfy_push(ntfy_topic, msg)
 
 def trigger_background_alert_check(threshold_pct, ntfy_topic):
@@ -304,7 +303,7 @@ def calculate_price_trends(df_card):
     df_sorted["day_index"] = np.arange(len(df_sorted))
     
     x = df_sorted["day_index"].values
-    y = df_sorted["price_usd"].values
+    y = df_sorted["price_mxn"].values
     
     m, b = np.polyfit(x, y, 1)
     
@@ -349,7 +348,7 @@ mxn_rate = get_usd_to_mxn_rate()
 # ==========================================
 if menu == "🏠 Dashboard de Mercado":
     st.title("🏠 Dashboard de Mercado")
-    st.caption(f"Tipo de cambio actual: 1 USD = ${mxn_rate:.2f} MXN")
+    st.caption(f"Tipo de cambio del día: $1 USD = ${mxn_rate:.2f} MXN")
     
     col_search, col_btn = st.columns([3, 1])
     with col_search:
@@ -358,7 +357,7 @@ if menu == "🏠 Dashboard de Mercado":
         st.write("")
         st.write("")
         if st.button("🔄 Actualizar", use_container_width=True):
-            with st.spinner("Consultando TCGPlayer mediante canal seguro..."):
+            with st.spinner("Consultando TCGPlayer y convirtiendo divisa..."):
                 count = update_market_cache(search_query, st.session_state["proxies"])
                 if count > 0:
                     st.success(f"Se actualizaron {count} cartas.")
@@ -390,8 +389,8 @@ if menu == "🏠 Dashboard de Mercado":
                 if idx < 2:
                     cols[idx].metric(
                         label=f"{row['name']} ({row['expansion']}) #{row['number']}",
-                        value=f"${row['price_usd']:.2f} USD",
-                        delta=f"+{row['pct_change']:.1f}% (${row['price_mxn']:.2f} MXN)"
+                        value=f"${row['price_mxn']:.2f} MXN",
+                        delta=f"+{row['pct_change']:.1f}% (${row['price_usd']:.2f} USD)"
                     )
 
             st.subheader("📉 Top Bajadas")
@@ -401,8 +400,8 @@ if menu == "🏠 Dashboard de Mercado":
                 if idx < 2:
                     cols_down[idx].metric(
                         label=f"{row['name']} ({row['expansion']}) #{row['number']}",
-                        value=f"${row['price_usd']:.2f} USD",
-                        delta=f"{row['pct_change']:.1f}% (${row['price_mxn']:.2f} MXN)"
+                        value=f"${row['price_mxn']:.2f} MXN",
+                        delta=f"{row['pct_change']:.1f}% (${row['price_usd']:.2f} USD)"
                     )
 
             st.markdown("---")
@@ -430,14 +429,14 @@ if menu == "🏠 Dashboard de Mercado":
             for _, row in df_filtered.iterrows():
                 c_card, c_price_input, c_add = st.columns([2.5, 1.2, 1])
                 with c_card:
-                    st.write(f"**{row['name']}** — *{row['expansion']}* (#{row['number']}) | Mercado: **${row['price_usd']:.2f} USD** (${row['price_mxn']:.2f} MXN)")
+                    st.write(f"**{row['name']}** — *{row['expansion']}* (#{row['number']}) | Mercado: **${row['price_mxn']:.2f} MXN** (${row['price_usd']:.2f} USD)")
                 with c_price_input:
-                    user_cost = st.number_input("Precio compra ($ USD)", min_value=0.0, value=float(row['price_usd']), step=0.5, key=f"cost_{row['card_id']}")
+                    user_cost = st.number_input("Precio compra ($ MXN)", min_value=0.0, value=float(row['price_mxn']), step=10.0, key=f"cost_{row['card_id']}")
                 with c_add:
                     st.write("")
                     if st.button("➕ Añadir", key=f"add_{row['card_id']}"):
                         add_to_collection(row['name'], row['expansion'], row['number'], user_cost, 1)
-                        st.success(f"¡Guardada a ${user_cost:.2f} USD!")
+                        st.success(f"¡Guardada a ${user_cost:.2f} MXN!")
 
     else:
         st.info("La base de datos está vacía. Haz clic en 'Actualizar' para cargar información.")
@@ -453,71 +452,70 @@ elif menu == "💼 Mi Colección":
     df_market = pd.read_sql_query("SELECT * FROM market_prices WHERE name != 'Desconocido' ORDER BY date DESC", conn)
     conn.close()
 
-    total_market_val_usd = 0.0
-    total_cost_usd = 0.0
+    total_market_val_mxn = 0.0
+    total_cost_mxn = 0.0
     
     if not df_col.empty:
         collection_details = []
         for _, row in df_col.iterrows():
-            cost_total = row["purchase_price_usd"] * row["quantity"]
-            total_cost_usd += cost_total
+            cost_total = row["purchase_price_mxn"] * row["quantity"]
+            total_cost_mxn += cost_total
             
-            # Coincidencia por nombre y número de carta
             match = df_market[df_market["name"].str.contains(row["name"], case=False, na=False)]
             if not match.empty and str(row["number"]).strip() != "N/A":
                 match_num = match[match["number"].astype(str).str.contains(str(row["number"]).strip(), case=False, na=False)]
                 if not match_num.empty:
                     match = match_num
 
-            current_unit_price = match.iloc[0]["price_usd"] if not match.empty else row["purchase_price_usd"]
+            current_unit_price = match.iloc[0]["price_mxn"] if not match.empty else row["purchase_price_mxn"]
             current_total_val = current_unit_price * row["quantity"]
-            total_market_val_usd += current_total_val
+            total_market_val_mxn += current_total_val
             
-            diff_unit_usd = current_unit_price - row["purchase_price_usd"]
-            diff_total_usd = current_total_val - cost_total
-            diff_pct = ((diff_unit_usd / row["purchase_price_usd"]) * 100) if row["purchase_price_usd"] > 0 else 0.0
+            diff_unit_mxn = current_unit_price - row["purchase_price_mxn"]
+            diff_total_mxn = current_total_val - cost_total
+            diff_pct = ((diff_unit_mxn / row["purchase_price_mxn"]) * 100) if row["purchase_price_mxn"] > 0 else 0.0
 
             collection_details.append({
                 "id": row["id"],
                 "name": row["name"],
                 "expansion": row["expansion"],
                 "number": row["number"],
-                "purchase_price_usd": row["purchase_price_usd"],
+                "purchase_price_mxn": row["purchase_price_mxn"],
                 "quantity": row["quantity"],
                 "current_unit_price": current_unit_price,
-                "diff_unit_usd": diff_unit_usd,
-                "diff_total_usd": diff_total_usd,
+                "diff_unit_mxn": diff_unit_mxn,
+                "diff_total_mxn": diff_total_mxn,
                 "diff_pct": diff_pct
             })
 
-        net_profit_usd = total_market_val_usd - total_cost_usd
-        net_profit_mxn = net_profit_usd * mxn_rate
-        pct_return = ((net_profit_usd / total_cost_usd) * 100) if total_cost_usd > 0 else 0.0
+        net_profit_mxn = total_market_val_mxn - total_cost_mxn
+        net_profit_usd = net_profit_mxn / mxn_rate if mxn_rate > 0 else 0.0
+        pct_return = ((net_profit_mxn / total_cost_mxn) * 100) if total_cost_mxn > 0 else 0.0
 
         c_met1, c_met2, c_met3 = st.columns(3)
-        c_met1.metric("Valor Actual de Mercado", f"${total_market_val_usd:.2f} USD", f"${total_market_val_usd*mxn_rate:.2f} MXN")
-        c_met2.metric("Inversión / Costo Total", f"${total_cost_usd:.2f} USD", f"${total_cost_usd*mxn_rate:.2f} MXN")
+        c_met1.metric("Valor Actual de Mercado", f"${total_market_val_mxn:.2f} MXN", f"${total_market_val_mxn/mxn_rate:.2f} USD")
+        c_met2.metric("Inversión / Costo Total", f"${total_cost_mxn:.2f} MXN", f"${total_cost_mxn/mxn_rate:.2f} USD")
         c_met3.metric(
             "Ganancia / Pérdida Neta", 
-            f"${net_profit_usd:+.2f} USD", 
-            delta=f"{pct_return:+.1f}% (${net_profit_mxn:+.2f} MXN)"
+            f"${net_profit_mxn:+.2f} MXN", 
+            delta=f"{pct_return:+.1f}% (${net_profit_usd:+.2f} USD)"
         )
 
         st.markdown("---")
         st.subheader("📋 Detalle de Cartas e Inversión")
 
         for item in collection_details:
-            color = "#00e676" if item["diff_total_usd"] >= 0 else "#ff5252"
-            status_text = f"📈 Ganancia: +${item['diff_total_usd']:.2f} USD ({item['diff_pct']:+.1f}%)" if item["diff_total_usd"] >= 0 else f"📉 Pérdida: ${item['diff_total_usd']:.2f} USD ({item['diff_pct']:+.1f}%)"
+            color = "#00e676" if item["diff_total_mxn"] >= 0 else "#ff5252"
+            status_text = f"📈 Ganancia: +${item['diff_total_mxn']:.2f} MXN ({item['diff_pct']:+.1f}%)" if item["diff_total_mxn"] >= 0 else f"📉 Pérdida: ${item['diff_total_mxn']:.2f} MXN ({item['diff_pct']:+.1f}%)"
             
             with st.expander(f"**{item['name']}** ({item['expansion']} #{item['number']}) — {status_text}"):
                 c1, c2, c3 = st.columns([2, 2, 1])
                 with c1:
-                    st.write(f"**Mercado Actual (Unidad):** ${item['current_unit_price']:.2f} USD (${item['current_unit_price']*mxn_rate:.2f} MXN)")
-                    st.write(f"**Diferencia por Unidad:** <span style='color:{color}; font-weight:bold;'>${item['diff_unit_usd']:+.2f} USD ({item['diff_pct']:+.1f}%)</span>", unsafe_allow_html=True)
+                    st.write(f"**Mercado Actual (Unidad):** ${item['current_unit_price']:.2f} MXN (${item['current_unit_price']/mxn_rate:.2f} USD)")
+                    st.write(f"**Diferencia por Unidad:** <span style='color:{color}; font-weight:bold;'>${item['diff_unit_mxn']:+.2f} MXN ({item['diff_pct']:+.1f}%)</span>", unsafe_allow_html=True)
                 with c2:
                     with st.form(f"edit_form_{item['id']}"):
-                        new_cost = st.number_input("Precio compra propio ($ USD)", min_value=0.0, value=float(item["purchase_price_usd"]), step=0.5)
+                        new_cost = st.number_input("Precio compra propio ($ MXN)", min_value=0.0, value=float(item["purchase_price_mxn"]), step=10.0)
                         new_qty = st.number_input("Cantidad", min_value=1, value=int(item["quantity"]), step=1)
                         if st.form_submit_button("💾 Guardar Cambios"):
                             update_collection_item(item['id'], new_cost, new_qty)
@@ -541,13 +539,13 @@ elif menu == "💼 Mi Colección":
                 col_exp = st.text_input("Expansión / Set")
                 col_num = st.text_input("Código / Número (ej. 004/102 o 151)")
             with c2:
-                col_price = st.number_input("Precio al que la compraste/conseguiste (USD)", min_value=0.0, step=0.5)
+                col_price = st.number_input("Precio al que la compraste/conseguiste (MXN)", min_value=0.0, step=10.0)
                 col_qty = st.number_input("Cantidad", min_value=1, value=1, step=1)
                 
             submit = st.form_submit_button("Guardar en Mi Colección")
             if submit and col_name:
                 add_to_collection(col_name, col_exp, col_num, col_price, col_qty)
-                st.success(f"¡{col_name} agregada con costo de ${col_price:.2f} USD!")
+                st.success(f"¡{col_name} agregada con costo de ${col_price:.2f} MXN!")
                 st.rerun()
 
 # ==========================================
@@ -568,18 +566,18 @@ elif menu == "📊 Predicciones y Gráficas":
         conn.close()
         
         if len(df_card) < 30:
-            last_p = df_card.iloc[-1]["price_usd"] if not df_card.empty else 50.0
+            last_p = df_card.iloc[-1]["price_mxn"] if not df_card.empty else 1000.0
             dates = [datetime.now() - timedelta(days=i) for i in range(30, 0, -1)]
-            prices = [max(1.0, last_p + np.random.normal(0, 1.5)) for _ in range(30)]
+            prices = [max(10.0, last_p + np.random.normal(0, 25.0)) for _ in range(30)]
             df_card = pd.DataFrame({
                 "date": [d.strftime("%Y-%m-%d") for d in dates],
-                "price_usd": prices,
-                "price_mxn": [p * mxn_rate for p in prices]
+                "price_mxn": prices,
+                "price_usd": [p / mxn_rate for p in prices]
             })
 
         st.subheader(f"Histórico de Precios: {selected_card}")
-        moneda = st.radio("Moneda de la Gráfica:", ["USD ($)", "MXN ($)"], horizontal=True)
-        col_price = "price_usd" if "USD" in moneda else "price_mxn"
+        moneda = st.radio("Moneda de la Gráfica:", ["MXN ($)", "USD ($)"], horizontal=True)
+        col_price = "price_mxn" if "MXN" in moneda else "price_usd"
         
         chart_data = df_card.set_index("date")[[col_price]]
         st.line_chart(chart_data)
@@ -591,8 +589,8 @@ elif menu == "📊 Predicciones y Gráficas":
         st.info(f"**Proyección Actual:** {diag}")
         
         c1, c2 = st.columns(2)
-        c1.metric("Proyección a 7 Días", f"${p7:.2f} USD", f"${p7*mxn_rate:.2f} MXN")
-        c2.metric("Proyección a 30 Días", f"${p30:.2f} USD", f"${p30*mxn_rate:.2f} MXN")
+        c1.metric("Proyección a 7 Días", f"${p7:.2f} MXN", f"${p7/mxn_rate:.2f} USD")
+        c2.metric("Proyección a 30 Días", f"${p30:.2f} MXN", f"${p30/mxn_rate:.2f} USD")
     else:
         st.info("No hay suficiente información registrada en la base de datos para generar gráficos.")
 
